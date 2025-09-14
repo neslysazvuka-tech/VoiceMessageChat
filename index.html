@@ -342,9 +342,11 @@
                         const users = snapshot.val();
                         const now = Date.now();
                         
-                        for (let id in users) {
-                            if (now - users[id].lastActivity > 7 * 60 * 1000) {
-                                database.ref('users/' + id).remove();
+                        if (users) {
+                            for (let id in users) {
+                                if (now - users[id].lastActivity > 7 * 60 * 1000) {
+                                    database.ref('users/' + id).remove();
+                                }
                             }
                         }
                     });
@@ -444,15 +446,34 @@
             timer.textContent = `00:${seconds}`;
         }
 
-        // Отображение сообщений
-        database.ref('messages').on('child_added', (snapshot) => {
-            const message = snapshot.val();
+        // Загрузка существующих сообщений при загрузке страницы
+        function loadExistingMessages() {
+            database.ref('messages').once('value', (snapshot) => {
+                const messages = snapshot.val();
+                if (messages) {
+                    noMessages.style.display = 'none';
+                    
+                    // Преобразуем объект в массив и сортируем по времени
+                    const messagesArray = Object.entries(messages).map(([key, value]) => {
+                        return { id: key, ...value };
+                    }).sort((a, b) => a.timestamp - b.timestamp);
+                    
+                    // Отображаем каждое сообщение
+                    messagesArray.forEach(message => {
+                        displayMessage(message);
+                    });
+                }
+            });
+        }
+
+        // Отображение сообщения
+        function displayMessage(message) {
             noMessages.style.display = 'none';
             
             // Создание элемента сообщения
             const messageElement = document.createElement('div');
             messageElement.classList.add('message');
-            messageElement.setAttribute('data-id', snapshot.key);
+            messageElement.setAttribute('data-id', message.id || generateMessageId());
             if (message.userId === userId) {
                 messageElement.classList.add('own');
             }
@@ -475,6 +496,18 @@
             
             messagesContainer.appendChild(messageElement);
             messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+
+        // Генерация ID для сообщения
+        function generateMessageId() {
+            return 'msg_' + Math.random().toString(36).substr(2, 9);
+        }
+
+        // Слушатель для новых сообщений
+        database.ref('messages').on('child_added', (snapshot) => {
+            const message = snapshot.val();
+            message.id = snapshot.key;
+            displayMessage(message);
             
             // Установка таймера для удаления сообщения через 3 минуты
             setTimeout(() => {
@@ -482,9 +515,11 @@
                 snapshot.ref.remove();
                 
                 // Удаление из Storage
-                storage.refFromURL(message.audioURL).delete().catch(error => {
-                    console.error('Ошибка удаления аудио:', error);
-                });
+                if (message.audioURL) {
+                    storage.refFromURL(message.audioURL).delete().catch(error => {
+                        console.error('Ошибка удаления аудио:', error);
+                    });
+                }
             }, 3 * 60 * 1000); // 3 минуты
         });
 
@@ -505,6 +540,9 @@
         // Обновление активности при взаимодействии с интерфейсом
         document.addEventListener('click', updateLastActivity);
         document.addEventListener('keydown', updateLastActivity);
+
+        // Загрузка существующих сообщений при загрузке страницы
+        window.addEventListener('load', loadExistingMessages);
     </script>
 </body>
 </html>
