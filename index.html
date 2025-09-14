@@ -205,6 +205,13 @@
             padding: 20px;
         }
         
+        .error-message {
+            text-align: center;
+            color: #ff4444;
+            padding: 10px;
+            font-size: 14px;
+        }
+        
         .footer {
             padding: 15px;
             text-align: center;
@@ -324,6 +331,8 @@
                 database.ref('users/' + userId).set({
                     username: currentUsername,
                     lastActivity: lastActivityTime
+                }).catch(error => {
+                    console.error('Ошибка обновления активности:', error);
                 });
             }
         }
@@ -350,7 +359,7 @@
                             }
                         }
                     });
-                }, 60000); // Проверка каждую минуту
+                }, 60000);
             }
         });
 
@@ -364,47 +373,80 @@
             if (!isRecording) {
                 try {
                     // Запрос разрешения на использование микрофона
-                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    const stream = await navigator.mediaDevices.getUserMedia({ 
+                        audio: {
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            sampleRate: 44100
+                        }
+                    });
                     
-                    // Создание MediaRecorder
-                    mediaRecorder = new MediaRecorder(stream);
+                    // Создание MediaRecorder с настройками
+                    const options = { 
+                        mimeType: 'audio/webm;codecs=opus',
+                        audioBitsPerSecond: 128000
+                    };
+                    
+                    mediaRecorder = new MediaRecorder(stream, options);
                     audioChunks = [];
                     
                     // Обработка данных записи
                     mediaRecorder.ondataavailable = (event) => {
-                        audioChunks.push(event.data);
+                        if (event.data.size > 0) {
+                            audioChunks.push(event.data);
+                        }
                     };
                     
                     // Окончание записи
                     mediaRecorder.onstop = async () => {
-                        // Создание Blob из записанных данных
-                        const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
-                        
-                        // Генерация имени файла
-                        const timestamp = Date.now();
-                        const audioFileName = `audio_${userId}_${timestamp}.webm`;
-                        
-                        // Загрузка в Firebase Storage
-                        const audioRef = storage.ref().child(audioFileName);
-                        await audioRef.put(audioBlob);
-                        
-                        // Получение URL аудио
-                        const audioURL = await audioRef.getDownloadURL();
-                        
-                        // Сохранение информации о сообщении в базе данных
-                        database.ref('messages').push({
-                            userId: userId,
-                            username: currentUsername,
-                            audioURL: audioURL,
-                            timestamp: timestamp
-                        });
-                        
-                        // Освобождение ресурсов микрофона
-                        stream.getTracks().forEach(track => track.stop());
+                        try {
+                            // Создание Blob из записанных данных
+                            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                            
+                            // Проверка размера файла
+                            if (audioBlob.size === 0) {
+                                throw new Error('Запись пуста');
+                            }
+                            
+                            // Генерация имени файла
+                            const timestamp = Date.now();
+                            const audioFileName = `audio_${userId}_${timestamp}.webm`;
+                            
+                            // Загрузка в Firebase Storage
+                            const audioRef = storage.ref().child(audioFileName);
+                            const snapshot = await audioRef.put(audioBlob);
+                            
+                            // Получение URL аудио
+                            const audioURL = await audioRef.getDownloadURL();
+                            
+                            // Сохранение информации о сообщении в базе данных
+                            await database.ref('messages').push({
+                                userId: userId,
+                                username: currentUsername,
+                                audioURL: audioURL,
+                                timestamp: timestamp
+                            });
+                            
+                            console.log('Аудио успешно загружено:', audioURL);
+                            
+                        } catch (error) {
+                            console.error('Ошибка при обработке записи:', error);
+                            alert('Ошибка при обработке записи: ' + error.message);
+                        } finally {
+                            // Освобождение ресурсов микрофона
+                            stream.getTracks().forEach(track => track.stop());
+                        }
+                    };
+                    
+                    // Обработка ошибок записи
+                    mediaRecorder.onerror = (event) => {
+                        console.error('Ошибка записи:', event.error);
+                        alert('Ошибка записи: ' + event.error.name);
+                        stopRecording();
                     };
                     
                     // Начало записи
-                    mediaRecorder.start();
+                    mediaRecorder.start(1000); // Захват данных каждую секунду
                     isRecording = true;
                     recordBtn.classList.add('recording');
                     
@@ -422,7 +464,7 @@
                     
                 } catch (error) {
                     console.error('Ошибка доступа к микрофону:', error);
-                    alert('Не удалось получить доступ к микрофону');
+                    alert('Не удалось получить доступ к микрофону: ' + error.message);
                 }
             } else {
                 stopRecording();
@@ -433,7 +475,9 @@
         function stopRecording() {
             if (isRecording) {
                 clearInterval(countdown);
-                mediaRecorder.stop();
+                if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                    mediaRecorder.stop();
+                }
                 isRecording = false;
                 recordBtn.classList.remove('recording');
                 timer.textContent = '00:35';
@@ -450,7 +494,7 @@
         function loadExistingMessages() {
             database.ref('messages').once('value', (snapshot) => {
                 const messages = snapshot.val();
-                if (messages) {
+                if (messages && Object.keys(messages).length > 0) {
                     noMessages.style.display = 'none';
                     
                     // Преобразуем объект в массив и сортируем по времени
@@ -462,7 +506,13 @@
                     messagesArray.forEach(message => {
                         displayMessage(message);
                     });
+                } else {
+                    noMessages.style.display = 'block';
                 }
+            }).catch(error => {
+                console.error('Ошибка загрузки сообщений:', error);
+                noMessages.textContent = 'Ошибка загрузки сообщений';
+                noMessages.style.display = 'block';
             });
         }
 
@@ -470,10 +520,17 @@
         function displayMessage(message) {
             noMessages.style.display = 'none';
             
+            // Проверка наличия необходимых данных
+            if (!message.audioURL || !message.username) {
+                console.error('Неполные данные сообщения:', message);
+                return;
+            }
+            
             // Создание элемента сообщения
             const messageElement = document.createElement('div');
             messageElement.classList.add('message');
-            messageElement.setAttribute('data-id', message.id || generateMessageId());
+            messageElement.setAttribute('data-id', message.id);
+            
             if (message.userId === userId) {
                 messageElement.classList.add('own');
             }
@@ -494,33 +551,45 @@
                 </div>
             `;
             
+            // Добавляем обработчик ошибок для аудио
+            const audioElement = messageElement.querySelector('audio');
+            audioElement.addEventListener('error', (e) => {
+                console.error('Ошибка загрузки аудио:', e);
+                audioElement.innerHTML = 'Ошибка загрузки аудио';
+            });
+            
             messagesContainer.appendChild(messageElement);
             messagesContainer.scrollTop = messagesContainer.scrollHeight;
         }
 
-        // Генерация ID для сообщения
-        function generateMessageId() {
-            return 'msg_' + Math.random().toString(36).substr(2, 9);
-        }
-
         // Слушатель для новых сообщений
         database.ref('messages').on('child_added', (snapshot) => {
-            const message = snapshot.val();
-            message.id = snapshot.key;
-            displayMessage(message);
-            
-            // Установка таймера для удаления сообщения через 3 минуты
-            setTimeout(() => {
-                // Удаление из базы данных
-                snapshot.ref.remove();
+            try {
+                const message = snapshot.val();
+                message.id = snapshot.key;
                 
-                // Удаление из Storage
-                if (message.audioURL) {
-                    storage.refFromURL(message.audioURL).delete().catch(error => {
-                        console.error('Ошибка удаления аудио:', error);
-                    });
+                // Проверяем, что сообщение содержит все необходимые данные
+                if (message.audioURL && message.username) {
+                    displayMessage(message);
+                    
+                    // Установка таймера для удаления сообщения через 3 минуты
+                    setTimeout(() => {
+                        // Удаление из базы данных
+                        snapshot.ref.remove().catch(error => {
+                            console.error('Ошибка удаления сообщения:', error);
+                        });
+                        
+                        // Удаление из Storage
+                        if (message.audioURL) {
+                            storage.refFromURL(message.audioURL).delete().catch(error => {
+                                console.error('Ошибка удаления аудио:', error);
+                            });
+                        }
+                    }, 3 * 60 * 1000);
                 }
-            }, 3 * 60 * 1000); // 3 минуты
+            } catch (error) {
+                console.error('Ошибка обработки нового сообщения:', error);
+            }
         });
 
         // Удаление сообщений из интерфейса при удалении из базы
@@ -532,7 +601,7 @@
             }
             
             // Показать "Нет сообщений", если все удалены
-            if (messagesContainer.children.length === 1) {
+            if (messagesContainer.querySelectorAll('.message').length === 0) {
                 noMessages.style.display = 'block';
             }
         });
@@ -543,6 +612,17 @@
 
         // Загрузка существующих сообщений при загрузке страницы
         window.addEventListener('load', loadExistingMessages);
+
+        // Добавляем обработчик для проверки поддержки аудиоформатов
+        window.addEventListener('load', () => {
+            const audio = document.createElement('audio');
+            if (!audio.canPlayType('audio/webm')) {
+                const errorDiv = document.createElement('div');
+                errorDiv.className = 'error-message';
+                errorDiv.textContent = 'Ваш браузер не поддерживает формат WebM. Пожалуйста, используйте современный браузер (Chrome, Firefox, Edge).';
+                document.querySelector('.record-section').appendChild(errorDiv);
+            }
+        });
     </script>
 </body>
 </html>
