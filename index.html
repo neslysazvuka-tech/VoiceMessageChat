@@ -452,6 +452,7 @@
             // Создание элемента сообщения
             const messageElement = document.createElement('div');
             messageElement.classList.add('message');
+            messageElement.setAttribute('data-id', snapshot.key);
             if (message.userId === userId) {
                 messageElement.classList.add('own');
             }
